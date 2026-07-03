@@ -27,10 +27,13 @@
       appNameCustomLeft: "",
       appNameCustomRight: "",
       statusDisplayType: "details",
-      useTidalCovers: true,
+      useLocalCovers: false,
+      useOnlineCovers: false,
+      coverPriority: "local",
       activityTimeoutEnabled: true,
       activityTimeoutTime: 600000,
       showPauseIcon: true,
+
     },
 
     settings: null,
@@ -41,8 +44,10 @@
     isPlaying: false,
     updateTimeout: null,
     activityClearTimeout: null,
-    coverCache: new Map(),
-    MAX_COVER_CACHE_SIZE: 100,
+    reconnectTimeout: null,
+    reconnectAttempts: 0,
+    coverCache: new Map(),   // trackId -> resolved cover URL
+    MAX_COVER_CACHE_SIZE: 50,
     isSettingsOpen: false,
     api: null,
     tempSettings: null,
@@ -51,15 +56,14 @@
     lastTrackId: null,
     lastPlayingState: null,
     lastTime: 0,
-    previewCoverUrl: null,
-    previewCoverLoading: false,
-    lastPreviewTrackId: null,
 
+    _updatePresenceLock: false,
+
+    // Initialize plugin: load settings, register events, connect to Discord
     async init(api) {
       this.api = api;
       this.settings = { ...this.defaultSettings };
 
-      // Initialize lastProgressUpdate to prevent massive initial time delta
       this.lastProgressUpdate = Date.now();
 
       await this.loadSettings();
@@ -82,6 +86,7 @@
       }
     },
 
+    // Load persisted settings from storage
     async loadSettings() {
       if (!this.api?.storage?.get) return;
 
@@ -95,6 +100,7 @@
       }
     },
 
+    // Save current settings to persistent storage
     async saveSettings() {
       if (!this.api?.storage?.set) {
         if (this.isSettingsOpen) {
@@ -115,6 +121,7 @@
       }
     },
 
+    // Show temporary warning when storage is unavailable
     showStorageWarning() {
       const statusText = document.querySelector(".drpc-status-text");
       if (statusText) {
@@ -128,6 +135,7 @@
       }
     },
 
+    // Apply temp settings, handle connect/disconnect
     async applySettings() {
       this.settings = { ...this.tempSettings };
 
@@ -147,6 +155,7 @@
       this.updateConnectionStatus();
     },
 
+    // Inject plugin CSS into document head
     injectStyles() {
       if (document.getElementById("drpc-styles")) return;
 
@@ -220,6 +229,10 @@
         }
         .drpc-icon {
           color: #5865F2;
+          display: inline-flex;
+          align-items: center;
+          position: relative;
+          top: 0.5px;
         }
         .drpc-close-btn {
           background: transparent;
@@ -239,10 +252,7 @@
           align-items: center;
           gap: 8px;
           padding: 12px 16px;
-          background: var(--bg-surface);
-          border-radius: 8px;
-          margin-bottom: 20px;
-          border: 1px solid var(--border-color);
+          border-bottom: 1px solid rgba(255, 255, 255, 0.06);
           transition: all 0.3s ease;
         }
         .drpc-status-dot {
@@ -275,14 +285,13 @@
           align-items: center;
           justify-content: space-between;
           padding: 16px;
-          background: var(--bg-surface);
-          border-radius: 8px;
-          margin-bottom: 20px;
         }
         .drpc-toggle-label {
           display: flex;
           flex-direction: column;
           gap: 4px;
+          flex: 1;
+          min-width: 0;
         }
         .drpc-toggle-title {
           color: var(--text-primary);
@@ -298,6 +307,7 @@
           position: relative;
           width: 48px;
           height: 26px;
+          flex-shrink: 0;
         }
         .drpc-toggle input {
           opacity: 0;
@@ -337,7 +347,7 @@
           transition: opacity 0.3s, filter 0.3s;
         }
         .drpc-settings-container.disabled .drpc-setting-item,
-        .drpc-settings-container.disabled .drpc-section {
+        .drpc-settings-container.disabled .drpc-section:not(:first-child) {
           opacity: 0.5;
           filter: grayscale(100%);
           pointer-events: none;
@@ -348,9 +358,10 @@
           align-items: center;
           justify-content: space-between;
           padding: 12px 16px;
-          background: var(--bg-surface);
-          border-radius: 8px;
-          margin-bottom: 12px;
+          border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        }
+        .drpc-setting-item:last-child {
+          border-bottom: none;
         }
         .drpc-setting-label {
           color: var(--text-primary);
@@ -363,9 +374,17 @@
           font-size: 12px;
           margin-top: 4px;
         }
+        .drpc-setting-text {
+          flex: 1;
+          min-width: 0;
+        }
 
         .drpc-section {
           margin-bottom: 24px;
+          background: var(--bg-surface);
+          border-radius: 8px;
+          border: 1px solid var(--border-color);
+          overflow: hidden;
         }
         .drpc-section-title {
           color: var(--text-primary);
@@ -373,7 +392,7 @@
           font-weight: 600;
           text-transform: uppercase;
           letter-spacing: 0.5px;
-          margin-bottom: 12px;
+          padding: 12px 16px 8px;
           opacity: 0.7;
         }
 
@@ -396,7 +415,7 @@
           width: 100%;
           padding: 10px 14px;
           background: var(--bg-surface);
-          border: 1.5px solid var(--border-color);
+          border: 1.5px solid rgba(255, 255, 255, 0.06);
           border-radius: 6px;
           color: var(--text-primary);
           font-size: 13px;
@@ -436,10 +455,14 @@
           display: flex;
           flex-direction: column;
           gap: 8px;
+          padding: 12px 16px;
+        }
+        .drpc-input-group + .drpc-input-group {
+          border-top: 1px solid rgba(255, 255, 255, 0.06);
         }
         .drpc-input-group label {
-          color: var(--text-secondary);
-          font-size: 12px;
+          color: var(--text-primary);
+          font-size: 13px;
           font-weight: 500;
         }
 
@@ -492,7 +515,7 @@
           background: #1e1f22;
           border: 1px solid #2b2d31;
           border-radius: 8px;
-          margin-top: 16px;
+          margin-top: 8px;
           overflow: hidden;
         }
 
@@ -663,7 +686,7 @@
           gap: 12px;
           margin-top: 20px;
           padding-top: 20px;
-          border-top: 1px solid var(--border-color);
+          border-top: 1px solid rgba(255, 255, 255, 0.06);
           pointer-events: auto !important;
         }
         .drpc-btn {
@@ -710,20 +733,84 @@
         .drpc-info-box {
           padding: 12px;
           background: rgba(33, 150, 243, 0.1);
-          border: 1px solid rgba(33, 150, 243, 0.3);
+          border: 1px solid rgba(33, 150, 243, 0.15);
           border-radius: 8px;
           margin-top: 12px;
+        }
+        .drpc-input-group .drpc-info-box {
+          margin-top: 4px;
         }
         .drpc-info-text {
           color: #2196F3;
           font-size: 12px;
           line-height: 1.5;
         }
+
+        /* Confirmation modal */
+        #drpc-confirm-overlay {
+          display: none;
+          position: fixed;
+          inset: 0;
+          background: rgba(0, 0, 0, 0.75);
+          z-index: 10002;
+          align-items: center;
+          justify-content: center;
+        }
+        #drpc-confirm-overlay.open {
+          display: flex;
+        }
+        #drpc-confirm-modal {
+          background: var(--bg-elevated);
+          border: 1px solid var(--border-color);
+          border-radius: 12px;
+          padding: 24px;
+          max-width: 420px;
+          width: 90%;
+          box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+        }
+        #drpc-confirm-modal .drpc-confirm-title {
+          font-size: 15px;
+          font-weight: 600;
+          color: var(--text-primary);
+          margin-bottom: 12px;
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+        #drpc-confirm-modal .drpc-confirm-title .drpc-confirm-icon {
+          font-size: 18px;
+        }
+        #drpc-confirm-modal .drpc-confirm-body {
+          font-size: 13px;
+          color: var(--text-secondary);
+          line-height: 1.6;
+          margin-bottom: 8px;
+        }
+        #drpc-confirm-modal .drpc-confirm-body strong {
+          color: var(--text-primary);
+        }
+        #drpc-confirm-modal .drpc-confirm-warning {
+          font-size: 12px;
+          color: #ffc107;
+          background: rgba(255, 193, 7, 0.08);
+          border: 1px solid rgba(255, 193, 7, 0.25);
+          border-radius: 6px;
+          padding: 10px 12px;
+          margin: 12px 0;
+          line-height: 1.5;
+        }
+        #drpc-confirm-modal .drpc-confirm-actions {
+          display: flex;
+          gap: 8px;
+          justify-content: flex-end;
+          margin-top: 20px;
+        }
       `;
 
       document.head.appendChild(style);
     },
 
+    // Build and inject the settings modal DOM
     createSettingsModal() {
       if (document.getElementById("drpc-modal")) return;
 
@@ -737,35 +824,38 @@
       modal.innerHTML = `
         <div class="drpc-header">
           <h2>
-            <span class="drpc-icon">🎮</span>
+            <span class="drpc-icon"><svg width="22" height="22" viewBox="0 -28.5 256 256" xmlns="http://www.w3.org/2000/svg"><path d="M216.856339,16.5966031 C200.285002,8.84328665 182.566144,3.2084988 164.041564,0 C161.766523,4.11318106 159.108624,9.64549908 157.276099,14.0464379 C137.583995,11.0849896 118.072967,11.0849896 98.7430163,14.0464379 C96.9108417,9.64549908 94.1925838,4.11318106 91.8971895,0 C73.3526068,3.2084988 55.6133949,8.86399117 39.0420583,16.6376612 C5.61752293,67.146514 -3.4433191,116.400813 1.08711069,164.955721 C23.2560196,181.510915 44.7403634,191.567697 65.8621325,198.148576 C71.0772151,190.971126 75.7283628,183.341335 79.7352139,175.300261 C72.104019,172.400575 64.7949724,168.822202 57.8887866,164.667963 C59.7209612,163.310589 61.5131304,161.891452 63.2445898,160.431257 C105.36741,180.133187 151.134928,180.133187 192.754523,160.431257 C194.506336,161.891452 196.298154,163.310589 198.110326,164.667963 C191.183787,168.842556 183.854737,172.420929 176.223542,175.320965 C180.230393,183.341335 184.861538,190.991831 190.096624,198.16893 C211.238746,191.588051 232.743023,181.531619 254.911949,164.955721 C260.227747,108.668201 245.831087,59.8662432 216.856339,16.5966031 Z M85.4738752,135.09489 C72.8290281,135.09489 62.4592217,123.290155 62.4592217,108.914901 C62.4592217,94.5396472 72.607595,82.7145587 85.4738752,82.7145587 C98.3405064,82.7145587 108.709962,94.5189427 108.488529,108.914901 C108.508531,123.290155 98.3405064,135.09489 85.4738752,135.09489 Z M170.525237,135.09489 C157.88039,135.09489 147.510584,123.290155 147.510584,108.914901 C147.510584,94.5396472 157.658606,82.7145587 170.525237,82.7145587 C183.391518,82.7145587 193.761324,94.5189427 193.539891,108.914901 C193.539891,123.290155 183.391518,135.09489 170.525237,135.09489 Z" fill="#5865F2" fill-rule="nonzero"></path></svg></span>
             Discord Rich Presence
           </h2>
           <button class="drpc-close-btn">×</button>
         </div>
 
         <div class="drpc-modal-body">
-          <div class="drpc-status">
-          <div class="drpc-status-dot"></div>
-          <span class="drpc-status-text">Checking connection...</span>
-        </div>
-
-        <div class="drpc-toggle-section">
-          <div class="drpc-toggle-label">
-            <div class="drpc-toggle-title">Enable Rich Presence</div>
-            <div class="drpc-toggle-desc">Show your music activity on Discord</div>
-          </div>
-          <label class="drpc-toggle">
-            <input type="checkbox" id="drpc-enabled" ${this.settings.enabled ? "checked" : ""}>
-            <span class="drpc-toggle-slider"></span>
-          </label>
-        </div>
 
         <div class="drpc-settings-container ${this.settings.enabled ? "" : "disabled"}">
+          <div class="drpc-section">
+            <div class="drpc-status">
+            <div class="drpc-status-dot"></div>
+            <span class="drpc-status-text">Checking connection...</span>
+          </div>
+
+          <div class="drpc-toggle-section">
+            <div class="drpc-toggle-label">
+              <div class="drpc-toggle-title">Enable Rich Presence</div>
+              <div class="drpc-toggle-desc">Show your music activity on Discord</div>
+            </div>
+            <label class="drpc-toggle">
+              <input type="checkbox" id="drpc-enabled" ${this.settings.enabled ? "checked" : ""}>
+              <span class="drpc-toggle-slider"></span>
+            </label>
+          </div>
+          </div>
+
           <div class="drpc-section">
             <div class="drpc-section-title">Display Options</div>
             
             <div class="drpc-setting-item">
-              <div>
+              <div class="drpc-setting-text">
                 <div class="drpc-setting-label">Show Progress Bar</div>
                 <div class="drpc-setting-desc">Display playback progress in Discord</div>
               </div>
@@ -776,8 +866,8 @@
             </div>
 
             <div class="drpc-setting-item">
-              <div>
-                <div class="drpc-setting-label">Show Pause Text</div>
+              <div class="drpc-setting-text">
+                <div class="drpc-setting-label">Show Pause Icon</div>
                 <div class="drpc-setting-desc">Display (Paused) on album art when paused</div>
               </div>
               <label class="drpc-toggle">
@@ -785,16 +875,72 @@
                 <span class="drpc-toggle-slider"></span>
               </label>
             </div>
+          </div>
+
+          <div class="drpc-section">
+            <div class="drpc-section-title">Cover Art</div>
 
             <div class="drpc-setting-item">
-              <div>
-                <div class="drpc-setting-label">Use Tidal for Cover Art</div>
-                <div class="drpc-setting-desc">Fetch album covers from Tidal</div>
+              <div class="drpc-setting-text">
+                <div class="drpc-setting-label">Use Local Covers</div>
+                <div class="drpc-setting-desc">
+                  Uploads your local album art to <strong>catbox.moe</strong> (a public third-party host) so Discord can display it.
+                  The image is stored publicly and permanently. Only enable this if you are comfortable with that.
+                </div>
               </div>
               <label class="drpc-toggle">
-                <input type="checkbox" id="drpc-use-tidal" ${this.settings.useTidalCovers ? "checked" : ""}>
+                <input type="checkbox" id="drpc-use-local-covers" ${this.settings.useLocalCovers ? "checked" : ""}>
                 <span class="drpc-toggle-slider"></span>
               </label>
+            </div>
+
+            <div class="drpc-setting-item">
+              <div class="drpc-setting-text">
+                <div class="drpc-setting-label">Use Online Covers</div>
+                <div class="drpc-setting-desc">
+                  Fetches album art from installed cover provider plugins (e.g. Tidal, Qobuz, Saavn).
+                  Providers must be installed separately and registered as cover sources.
+                  Use <em>Cover Priority</em> below to control which source wins.
+                </div>
+              </div>
+              <label class="drpc-toggle">
+                <input type="checkbox" id="drpc-use-online-covers" ${this.settings.useOnlineCovers ? "checked" : ""}>
+                <span class="drpc-toggle-slider"></span>
+              </label>
+            </div>
+
+            <div class="drpc-setting-item">
+              <div style="width: 100%;">
+                <div class="drpc-setting-label">Cover Priority</div>
+                <div class="drpc-setting-desc">
+                  Controls which cover source is preferred when multiple are available.
+                  Enter source IDs separated by <code>/</code> in order of preference — e.g. <code>jiosaavn/qobuz/local/tidal</code>.
+                  The plugin waits up to 4 seconds for the first result, then 2 more seconds for higher-priority sources before picking the best available.
+                  Use <code>local</code> for local covers; other IDs must match the source ID registered by the provider plugin.
+                </div>
+                <div style="display: flex; gap: 8px; margin-top: 8px; align-items: center;">
+                  <input
+                    type="text"
+                    id="drpc-cover-priority"
+                    value="${this.settings.coverPriority}"
+                    placeholder="jiosaavn/qobuz/local/tidal"
+                    style="flex: 1; padding: 6px 8px; border-radius: 4px; border: 1px solid rgba(255,255,255,0.15); background: rgba(0,0,0,0.2); color: inherit; font-size: 12px; box-sizing: border-box;"
+                  >
+                  <button class="drpc-btn drpc-btn-secondary" id="drpc-cover-priority-set" style="flex: none; padding: 6px 12px; font-size: 12px;">Set</button>
+                </div>
+                <div id="drpc-cover-priority-feedback" style="font-size: 11px; margin-top: 5px; min-height: 16px;"></div>
+              </div>
+            </div>
+
+            <div class="drpc-setting-item">
+              <div class="drpc-setting-text">
+                <div class="drpc-setting-label">Refresh Cover Art</div>
+                <div class="drpc-setting-desc">
+                  Clears the cached cover for the current track and re-fetches it from scratch.
+                  Use this if the wrong cover is showing on Discord.
+                </div>
+              </div>
+              <button class="drpc-btn drpc-btn-secondary" id="drpc-refresh-cover-btn" style="flex: none; padding: 6px 12px; font-size: 12px;">Refresh</button>
             </div>
           </div>
 
@@ -802,7 +948,7 @@
             <div class="drpc-section-title">Activity Timeout</div>
             
             <div class="drpc-setting-item">
-              <div>
+              <div class="drpc-setting-text">
                 <div class="drpc-setting-label">Clear When Paused</div>
                 <div class="drpc-setting-desc">Auto-clear presence after inactivity</div>
               </div>
@@ -873,8 +1019,8 @@
               <label>Status Display (Member List)</label>
               <select id="drpc-status-display-type" class="drpc-select">
                 <option value="name">App Name</option>
-                <option value="details">Line 1 (Details)</option>
-                <option value="state">Line 2 (State)</option>
+                <option value="details">Details</option>
+                <option value="state">State</option>
               </select>
               <div class="drpc-info-box">
                 <div class="drpc-info-text">
@@ -924,7 +1070,7 @@
             </div>
 
             <div class="drpc-input-group">
-              <label>Line 1 (Details)</label>
+              <label>Details</label>
               <div class="drpc-compound-format">
                 <select id="drpc-line1-left" class="drpc-select drpc-compound-select">
                   <option value="none">None</option>
@@ -959,7 +1105,7 @@
             </div>
 
             <div class="drpc-input-group">
-              <label>Line 2 (State)</label>
+              <label>State</label>
               <div class="drpc-compound-format">
                 <select id="drpc-line2-left" class="drpc-select drpc-compound-select">
                   <option value="none">None</option>
@@ -994,7 +1140,7 @@
             </div>
 
             <div class="drpc-input-group">
-              <label>Line 3 (Album Art Hover Text)</label>
+              <label>Album Details</label>
               <div class="drpc-compound-format">
                 <select id="drpc-line3-left" class="drpc-select drpc-compound-select">
                   <option value="none">None</option>
@@ -1044,7 +1190,48 @@
 
       document.body.appendChild(modal);
 
-      // Event listeners
+      // Confirmation modal for local cover upload
+      const confirmOverlay = document.createElement("div");
+      confirmOverlay.id = "drpc-confirm-overlay";
+      confirmOverlay.innerHTML = `
+        <div id="drpc-confirm-modal">
+          <div class="drpc-confirm-title">
+            <span class="drpc-confirm-icon">⚠️</span>
+            Third-Party Upload Warning
+          </div>
+          <div class="drpc-confirm-body">
+            Enabling <strong>Use Local Covers</strong> will upload your local album art to
+            <strong>catbox.moe</strong>, a public third-party file hosting service.
+          </div>
+          <div class="drpc-confirm-warning">
+            Uploaded images are stored <strong>publicly and permanently</strong> on catbox.moe's servers.
+            Anyone with the link can view them. Audion has no control over catbox.moe's availability,
+            policies, or data handling. Proceed only if you are comfortable with this.
+          </div>
+          <div class="drpc-confirm-body">
+            You can disable this at any time to stop future uploads. Images already uploaded will remain on catbox.moe.
+          </div>
+          <div class="drpc-confirm-actions">
+            <button class="drpc-btn drpc-btn-secondary" id="drpc-confirm-cancel">Cancel</button>
+            <button class="drpc-btn drpc-btn-primary" id="drpc-confirm-accept">I Understand, Enable</button>
+          </div>
+        </div>
+      `;
+      document.body.appendChild(confirmOverlay);
+
+      confirmOverlay.querySelector("#drpc-confirm-cancel").addEventListener("click", () => {
+        confirmOverlay.classList.remove("open");
+        // Revert the toggle visually
+        modal.querySelector("#drpc-use-local-covers").checked = false;
+        this.tempSettings.useLocalCovers = false;
+      });
+
+      confirmOverlay.querySelector("#drpc-confirm-accept").addEventListener("click", () => {
+        confirmOverlay.classList.remove("open");
+        modal.querySelector("#drpc-use-local-covers").checked = true;
+        this.tempSettings.useLocalCovers = true;
+      });
+
       modal
         .querySelector(".drpc-close-btn")
         .addEventListener("click", () => this.closeSettings());
@@ -1070,9 +1257,58 @@
           this.tempSettings.showPauseIcon = e.target.checked;
         });
 
-      modal.querySelector("#drpc-use-tidal").addEventListener("change", (e) => {
-        this.tempSettings.useTidalCovers = e.target.checked;
-      });
+      modal
+        .querySelector("#drpc-refresh-cover-btn")
+        .addEventListener("click", () => this.refreshCover());
+
+      modal
+        .querySelector("#drpc-use-local-covers")
+        .addEventListener("change", (e) => {
+          if (e.target.checked) {
+            // show confirmation before enabling . will set tempSettings on accept
+            e.target.checked = false; // revert until confirmed
+            document.getElementById("drpc-confirm-overlay").classList.add("open");
+          } else {
+            this.tempSettings.useLocalCovers = false;
+          }
+        });
+
+      modal
+        .querySelector("#drpc-use-online-covers")
+        .addEventListener("change", (e) => {
+          this.tempSettings.useOnlineCovers = e.target.checked;
+        });
+
+      modal
+        .querySelector("#drpc-cover-priority-set")
+        .addEventListener("click", () => {
+          const input = modal.querySelector("#drpc-cover-priority");
+          const feedback = modal.querySelector("#drpc-cover-priority-feedback");
+          const value = input.value.trim();
+
+          // validate: only letters and slashes, no leading/trailing slash, no double slash
+          const valid =
+            value.length > 0 &&
+            /^[a-zA-Z]+(?:\/[a-zA-Z]+)*$/.test(value);
+
+          if (valid) {
+            this.tempSettings.coverPriority = value.toLowerCase();
+            input.style.borderColor = "rgba(59, 165, 93, 0.6)";
+            feedback.style.color = "#3ba55d";
+            feedback.textContent = "✓ Priority saved.";
+            setTimeout(() => {
+              input.style.borderColor = "rgba(255,255,255,0.15)";
+              feedback.textContent = "";
+            }, 2000);
+          } else {
+            input.style.borderColor = "rgba(237, 66, 69, 0.7)";
+            feedback.style.color = "#ed4245";
+            feedback.textContent = "Invalid format. Use letters and slashes only, e.g. jiosaavn/qobuz/local/tidal";
+            setTimeout(() => {
+              input.style.borderColor = "rgba(255,255,255,0.15)";
+            }, 2500);
+          }
+        });
 
       modal
         .querySelector("#drpc-timeout-enabled")
@@ -1096,7 +1332,6 @@
         this.tempSettings.updateInterval = seconds * 1000;
       });
 
-      // Status Display Type
       const statusDisplayType = modal.querySelector(
         "#drpc-status-display-type",
       );
@@ -1106,7 +1341,6 @@
         this.updatePreview();
       });
 
-      // App Name selects
       const appNameLeft = modal.querySelector("#drpc-app-name-left");
       const appNameRight = modal.querySelector("#drpc-app-name-right");
       const appNameCustomLeft = modal.querySelector(
@@ -1121,7 +1355,6 @@
       appNameCustomLeft.value = this.settings.appNameCustomLeft;
       appNameCustomRight.value = this.settings.appNameCustomRight;
 
-      // Line 1 selects
       const line1Left = modal.querySelector("#drpc-line1-left");
       const line1Right = modal.querySelector("#drpc-line1-right");
       const line1CustomLeft = modal.querySelector("#drpc-line1-custom-left");
@@ -1132,7 +1365,6 @@
       line1CustomLeft.value = this.settings.line1CustomLeft;
       line1CustomRight.value = this.settings.line1CustomRight;
 
-      // Line 2 selects
       const line2Left = modal.querySelector("#drpc-line2-left");
       const line2Right = modal.querySelector("#drpc-line2-right");
       const line2CustomLeft = modal.querySelector("#drpc-line2-custom-left");
@@ -1143,7 +1375,6 @@
       line2CustomLeft.value = this.settings.line2CustomLeft;
       line2CustomRight.value = this.settings.line2CustomRight;
 
-      // Line 3 selects
       const line3Left = modal.querySelector("#drpc-line3-left");
       const line3Right = modal.querySelector("#drpc-line3-right");
       const line3CustomLeft = modal.querySelector("#drpc-line3-custom-left");
@@ -1175,7 +1406,6 @@
 
       updateCustomInputs();
 
-      // App Name event listeners
       appNameLeft.addEventListener("change", (e) => {
         this.tempSettings.appNameLeft = e.target.value;
         updateCustomInputs();
@@ -1195,7 +1425,6 @@
         this.updatePreview();
       });
 
-      // Line 1 event listeners
       line1Left.addEventListener("change", (e) => {
         this.tempSettings.line1Left = e.target.value;
         updateCustomInputs();
@@ -1215,7 +1444,6 @@
         this.updatePreview();
       });
 
-      // Line 2 event listeners
       line2Left.addEventListener("change", (e) => {
         this.tempSettings.line2Left = e.target.value;
         updateCustomInputs();
@@ -1235,7 +1463,6 @@
         this.updatePreview();
       });
 
-      // Line 3 event listeners
       line3Left.addEventListener("change", (e) => {
         this.tempSettings.line3Left = e.target.value;
         updateCustomInputs();
@@ -1266,22 +1493,25 @@
       this.updatePreview();
     },
 
+    // Register menu button in Audion playerbar
     createMenuButton() {
       if (!this.api?.ui) return;
 
       const button = document.createElement("button");
-      button.textContent = "Discord RPC Settings";
       button.style.cssText = `display: flex; align-items: center; gap: 8px;`;
-
-      const icon = document.createElement("span");
-      icon.textContent = "🎮";
-      button.insertBefore(icon, button.firstChild);
+      button.innerHTML = `
+        <svg width="18" height="18" viewBox="0 -28.5 256 256" xmlns="http://www.w3.org/2000/svg" style="margin-top: -0.5px">
+          <path d="M216.856339,16.5966031 C200.285002,8.84328665 182.566144,3.2084988 164.041564,0 C161.766523,4.11318106 159.108624,9.64549908 157.276099,14.0464379 C137.583995,11.0849896 118.072967,11.0849896 98.7430163,14.0464379 C96.9108417,9.64549908 94.1925838,4.11318106 91.8971895,0 C73.3526068,3.2084988 55.6133949,8.86399117 39.0420583,16.6376612 C5.61752293,67.146514 -3.4433191,116.400813 1.08711069,164.955721 C23.2560196,181.510915 44.7403634,191.567697 65.8621325,198.148576 C71.0772151,190.971126 75.7283628,183.341335 79.7352139,175.300261 C72.104019,172.400575 64.7949724,168.822202 57.8887866,164.667963 C59.7209612,163.310589 61.5131304,161.891452 63.2445898,160.431257 C105.36741,180.133187 151.134928,180.133187 192.754523,160.431257 C194.506336,161.891452 196.298154,163.310589 198.110326,164.667963 C191.183787,168.842556 183.854737,172.420929 176.223542,175.320965 C180.230393,183.341335 184.861538,190.991831 190.096624,198.16893 C211.238746,191.588051 232.743023,181.531619 254.911949,164.955721 C260.227747,108.668201 245.831087,59.8662432 216.856339,16.5966031 Z M85.4738752,135.09489 C72.8290281,135.09489 62.4592217,123.290155 62.4592217,108.914901 C62.4592217,94.5396472 72.607595,82.7145587 85.4738752,82.7145587 C98.3405064,82.7145587 108.709962,94.5189427 108.488529,108.914901 C108.508531,123.290155 98.3405064,135.09489 85.4738752,135.09489 Z M170.525237,135.09489 C157.88039,135.09489 147.510584,123.290155 147.510584,108.914901 C147.510584,94.5396472 157.658606,82.7145587 170.525237,82.7145587 C183.391518,82.7145587 193.761324,94.5189427 193.539891,108.914901 C193.539891,123.290155 183.391518,135.09489 170.525237,135.09489 Z" fill="#5865F2" fill-rule="nonzero"></path>
+        </svg>
+        <span>Discord Rich Presence</span>
+      `;
 
       button.addEventListener("click", () => this.openSettings());
 
       this.api.ui.registerSlot("playerbar:menu", button, 5);
     },
 
+    // Open the settings modal
     openSettings() {
       this.isSettingsOpen = true;
       this.tempSettings = { ...this.settings };
@@ -1297,22 +1527,21 @@
       this.startConnectionStatusPolling();
     },
 
+    // Close the settings modal and clean up
     closeSettings() {
       this.isSettingsOpen = false;
       const modal = document.getElementById("drpc-modal");
       const overlay = document.getElementById("drpc-overlay");
+      const confirmOverlay = document.getElementById("drpc-confirm-overlay");
 
       modal.classList.remove("open");
       overlay.classList.remove("open");
+      if (confirmOverlay) confirmOverlay.classList.remove("open");
 
       this.stopConnectionStatusPolling();
-
-      // Clean up preview state to prevent memory leaks
-      this.previewCoverUrl = null;
-      this.lastPreviewTrackId = null;
-      this.previewCoverLoading = false;
     },
 
+    // Poll Discord connection status while modal is open
     startConnectionStatusPolling() {
       this.stopConnectionStatusPolling();
       this.updateConnectionStatus();
@@ -1324,6 +1553,7 @@
       }, 500);
     },
 
+    // Stop polling connection status
     stopConnectionStatusPolling() {
       if (this.connectionStatusInterval) {
         clearInterval(this.connectionStatusInterval);
@@ -1331,6 +1561,7 @@
       }
     },
 
+    // Update status indicator dot and text in modal
     updateConnectionStatus() {
       const statusDot = document.querySelector(".drpc-status-dot");
       const statusText = document.querySelector(".drpc-status-text");
@@ -1350,10 +1581,11 @@
         statusText.textContent = "Connected to Discord";
       } else {
         statusDot.className = "drpc-status-dot disconnected";
-        statusText.textContent = "Disconnected";
+        statusText.textContent = "Disconnected from Discord";
       }
     },
 
+    // Re-render the Discord presence preview card
     async updatePreview() {
       if (!this.isSettingsOpen) return;
 
@@ -1362,17 +1594,10 @@
 
       const settings = this.tempSettings || this.settings;
 
-      // Get real track data or fallback to mock
       let track = null;
       try {
         track = this.api?.player?.getCurrentTrack?.() || this.currentTrack;
       } catch (e) {
-        // Ignore errors
-      }
-
-      // If track changed, reset cover loading state
-      if (track?.id && track.id !== this.lastPreviewTrackId) {
-        this.lastPreviewTrackId = track.id;
       }
 
       const mockTrack = {
@@ -1381,7 +1606,6 @@
         album: "Album Name",
       };
 
-      // Build formats with real data, fallback
       const buildFormatWithFallback = (
         leftType,
         rightType,
@@ -1390,7 +1614,6 @@
       ) => {
         const parts = [];
 
-        // Left side
         if (leftType === "custom" && leftCustom) {
           parts.push(leftCustom);
         } else if (leftType === "track_title") {
@@ -1401,7 +1624,6 @@
           parts.push(track?.album || mockTrack.album);
         }
 
-        // Right side
         if (rightType === "custom" && rightCustom) {
           parts.push(rightCustom);
         } else if (rightType === "track_title") {
@@ -1443,29 +1665,16 @@
         settings.line3CustomRight,
       );
 
-      // Determine what shows in "Listening to X"
       const listeningToText = appNameText || "Audion";
 
-      // Use emoji as fallback
       let coverHtml = '<div class="drpc-discord-image">🎵</div>';
-
-      if (settings.useTidalCovers && track?.title) {
-        const coverKey = `${track.artist || ""}-${track.title}`;
-
-        if (this.coverCache.has(coverKey)) {
-          const cachedCover = this.coverCache.get(coverKey);
-          if (cachedCover) {
-            coverHtml = `<div class="drpc-discord-image"><img src="${cachedCover}" alt="Album Cover"></div>`;
-          } else {
-            coverHtml = '<div class="drpc-discord-image">🎵</div>';
-          }
-        } else if (!this.previewCoverLoading) {
-          coverHtml = '<div class="drpc-discord-image loading">🎵</div>';
-          this.previewCoverLoading = true;
-          this.fetchPreviewCover(track, coverKey);
-        } else {
-          coverHtml = '<div class="drpc-discord-image loading">🎵</div>';
+      const rawCover = track?.cover_url || track?.track_cover_path || track?.track_cover;
+      if (rawCover) {
+        let src = rawCover;
+        if (!src.startsWith("http") && !src.startsWith("data:")) {
+          src = "http://asset.localhost/" + encodeURIComponent(src.replace(/^file:\/{2,3}/, ""));
         }
+        coverHtml = `<div class="drpc-discord-image"><img src="${src}" alt="Album Cover"></div>`;
       }
 
       previewContent.innerHTML = `
@@ -1506,41 +1715,7 @@
       `;
     },
 
-    async fetchPreviewCover(track, cacheKey) {
-      try {
-        if (!this.isSettingsOpen) {
-          this.previewCoverLoading = false;
-          return;
-        }
-
-        const coverUrl = await this.searchCoverFromTidal(
-          track.title,
-          track.artist || "",
-        );
-
-        if (!this.isSettingsOpen) {
-          this.previewCoverLoading = false;
-          return;
-        }
-
-        this.coverCache.set(cacheKey, coverUrl);
-        this.pruneCache();
-        this.previewCoverUrl = coverUrl;
-
-        console.log(
-          `[Discord RPC Preview] Tidal cover ${coverUrl ? "found" : "not found"} for "${track.title}"`,
-        );
-      } catch (error) {
-        console.error("[Discord RPC Preview] Cover fetch error:", error);
-        this.coverCache.set(cacheKey, null);
-      } finally {
-        this.previewCoverLoading = false;
-        if (this.isSettingsOpen) {
-          this.updatePreview();
-        }
-      }
-    },
-
+    // Reset all settings to defaults
     resetSettings() {
       this.tempSettings = { ...this.defaultSettings };
 
@@ -1550,8 +1725,14 @@
         this.tempSettings.showProgress;
       modal.querySelector("#drpc-show-pause-icon").checked =
         this.tempSettings.showPauseIcon;
-      modal.querySelector("#drpc-use-tidal").checked =
-        this.tempSettings.useTidalCovers;
+      modal.querySelector("#drpc-use-local-covers").checked =
+        this.tempSettings.useLocalCovers;
+      modal.querySelector("#drpc-use-online-covers").checked =
+        this.tempSettings.useOnlineCovers;
+      modal.querySelector("#drpc-cover-priority").value =
+        this.tempSettings.coverPriority;
+      modal.querySelector("#drpc-cover-priority").style.borderColor = "rgba(255,255,255,0.15)";
+      modal.querySelector("#drpc-cover-priority-feedback").textContent = "";
       modal.querySelector("#drpc-timeout-enabled").checked =
         this.tempSettings.activityTimeoutEnabled;
 
@@ -1602,6 +1783,7 @@
       this.updatePreview();
     },
 
+    // Build a formatted string from left/right field config
     buildCompoundFormat(leftType, rightType, leftCustom, rightCustom, track) {
       const parts = [];
 
@@ -1628,12 +1810,14 @@
       return parts.filter(Boolean).join(" • ");
     },
 
+    // Connect to Discord RPC with exponential backoff
     async connect() {
       if (this.isConnected) return;
 
       try {
         await this.api.discord.connect();
         this.isConnected = true;
+        this.reconnectAttempts = 0;
 
         if (this.currentTrack) {
           this.updatePresence(true);
@@ -1642,30 +1826,36 @@
         console.error("[Discord RPC] Connection failed:", error);
         this.isConnected = false;
 
-        setTimeout(() => {
+        this.reconnectAttempts++;
+        const delay = Math.min(5000 * Math.pow(2, this.reconnectAttempts - 1), 60000);
+
+        if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
+        this.reconnectTimeout = setTimeout(() => {
           if (this.settings.enabled) {
             this.connect();
           }
-        }, 5000);
+        }, delay);
       }
     },
 
+    // Disconnect from Discord RPC
     async disconnect() {
       if (!this.isConnected) return;
 
       try {
         await this.api.discord.disconnect();
         this.isConnected = false;
+        this.reconnectAttempts = 0;
       } catch (error) {
         console.error("[Discord RPC] Disconnect error:", error);
       }
     },
 
+    // Handle track change: update state and push presence
     handleTrackChange(data) {
       const { track } = data;
       if (!track) return;
 
-      // Only update if the track actually changed
       if (this.currentTrack && this.currentTrack.id === track.id) {
         return;
       }
@@ -1687,16 +1877,15 @@
 
       this.updatePresence(true);
 
-      // Update preview if settings modal is open
       if (this.isSettingsOpen) {
         this.updatePreview();
       }
     },
 
+    // Handle play/pause state change
     handlePlaybackState(data) {
       const { isPlaying } = data;
 
-      // Only update if the state actually changed
       if (this.isPlaying === isPlaying) {
         return;
       }
@@ -1715,6 +1904,7 @@
       }
     },
 
+    // Handle time update: schedule throttled presence update
     handleTimeUpdate(data) {
       const { currentTime, duration } = data;
       this.currentTime = currentTime || 0;
@@ -1723,6 +1913,7 @@
       this.scheduleUpdate();
     },
 
+    // Handle seek: push immediate presence update
     handleSeeked(data) {
       const { currentTime, duration } = data;
       this.currentTime = currentTime || 0;
@@ -1731,6 +1922,7 @@
       this.updatePresence(true);
     },
 
+    // Schedule throttled presence update
     scheduleUpdate() {
       const now = Date.now();
 
@@ -1739,7 +1931,6 @@
       const timeDiff = Math.abs(this.currentTime - this.lastTime);
       const seeked = timeDiff > 2;
 
-      // Immediate update for important changes
       if (songChanged || pauseChanged || seeked) {
         if (this.updateTimeout) {
           clearTimeout(this.updateTimeout);
@@ -1750,10 +1941,8 @@
         return;
       }
 
-      // Update lastTime
       this.lastTime = this.currentTime;
 
-      // For normal progress updates, check if interval has passed
       const timeSinceLastUpdate = now - this.lastProgressUpdate;
 
       if (timeSinceLastUpdate >= this.settings.updateInterval) {
@@ -1771,6 +1960,7 @@
       }
     },
 
+    // Set timeout to clear presence when paused too long
     setActivityTimeout() {
       if (this.activityClearTimeout) {
         clearTimeout(this.activityClearTimeout);
@@ -1788,191 +1978,267 @@
       }
     },
 
+    // Send presence data to Discord with concurrency guard
     async updatePresence(forceUpdate = false) {
       if (!this.settings.enabled || !this.isConnected) return;
+      if (this._updatePresenceLock) return;
+      this._updatePresenceLock = true;
 
-      // Throttle updates (non-forced)
-      if (!forceUpdate) {
-        const now = Date.now();
-        const timeSinceLastUpdate = now - this.lastProgressUpdate;
+      const capturedIsPlaying = this.isPlaying;
 
-        if (timeSinceLastUpdate < this.settings.updateInterval) {
-          return;
+      try {
+        if (!forceUpdate) {
+          const now = Date.now();
+          const timeSinceLastUpdate = now - this.lastProgressUpdate;
+
+          if (timeSinceLastUpdate < this.settings.updateInterval) {
+            return;
+          }
         }
-      }
 
-      // Get current track info
-      if (!this.currentTrack) {
+        if (!this.currentTrack) return;
+
         try {
-          this.currentTrack = this.api.player.getCurrentTrack();
-          this.isPlaying = this.api.player.isPlaying();
           this.currentTime = this.api.player.getCurrentTime();
           this.duration = this.api.player.getDuration();
-        } catch (error) {
+        } catch (error) {}
+
+        if (!forceUpdate && capturedIsPlaying && this.currentTime === 0) {
           return;
         }
-      }
 
-      if (!this.currentTrack) return;
+        this.lastTrackId = this.currentTrack?.id;
+        this.lastPlayingState = this.isPlaying;
 
-      try {
-        this.isPlaying = this.api.player.isPlaying();
-        this.currentTime = this.api.player.getCurrentTime();
-        this.duration = this.api.player.getDuration();
-      } catch (error) {}
-
-      // Update tracking variables
-      this.lastTrackId = this.currentTrack?.id;
-      this.lastPlayingState = this.isPlaying;
-
-      const line1 = this.buildCompoundFormat(
-        this.settings.line1Left,
-        this.settings.line1Right,
-        this.settings.line1CustomLeft,
-        this.settings.line1CustomRight,
-        this.currentTrack,
-      );
-
-      const line2 = this.buildCompoundFormat(
-        this.settings.line2Left,
-        this.settings.line2Right,
-        this.settings.line2CustomLeft,
-        this.settings.line2CustomRight,
-        this.currentTrack,
-      );
-
-      const line3 = this.buildCompoundFormat(
-        this.settings.line3Left,
-        this.settings.line3Right,
-        this.settings.line3CustomLeft,
-        this.settings.line3CustomRight,
-        this.currentTrack,
-      );
-
-      const appName = this.buildCompoundFormat(
-        this.settings.appNameLeft,
-        this.settings.appNameRight,
-        this.settings.appNameCustomLeft,
-        this.settings.appNameCustomRight,
-        this.currentTrack,
-      );
-
-      const presenceData = {
-        line1: line1 || "Unknown",
-        line2: line2 || "Unknown",
-        line3: line3 || null,
-        app_name: appName || null,
-        status_display_type: this.settings.statusDisplayType,
-        cover_url: await this.getCoverUrl(),
-        current_time: Math.floor(this.currentTime * 1000),
-        duration: Math.floor(this.duration * 1000),
-        is_playing: this.isPlaying,
-        show_pause_icon: this.settings.showPauseIcon,
-      };
-
-      console.log("[Discord RPC] Sending presence data:", presenceData);
-
-      try {
-        await this.api.discord.updatePresence(presenceData);
-        this.lastProgressUpdate = Date.now();
-      } catch (error) {
-        console.error("[Discord RPC] Update failed:", error);
-        this.isConnected = false;
-        setTimeout(() => this.connect(), 2000);
-      }
-    },
-
-    async getCoverUrl() {
-      // If Tidal fetching is disabled, only use local covers
-      if (!this.settings.useTidalCovers) {
-        const coverUrl = this.currentTrack?.cover_url;
-        if (typeof coverUrl === "string" && coverUrl.trim() !== "") {
-          try {
-            const url = new URL(coverUrl);
-            if (url.protocol === "http:" || url.protocol === "https:") {
-              return coverUrl;
-            }
-          } catch {}
-        }
-        return null;
-      }
-
-      // Try local cover first
-      const coverUrl = this.currentTrack?.cover_url;
-      if (typeof coverUrl === "string" && coverUrl.trim() !== "") {
-        try {
-          const url = new URL(coverUrl);
-          if (url.protocol === "http:" || url.protocol === "https:") {
-            return coverUrl;
-          }
-        } catch {}
-      }
-
-      // Local cover invalid or missing - fetch from Tidal
-      if (this.currentTrack?.title) {
-        const artist = this.currentTrack.artist || "";
-        const cacheKey = `${artist}-${this.currentTrack.title}`;
-
-        if (this.coverCache.has(cacheKey)) {
-          const cached = this.coverCache.get(cacheKey);
-          return cached;
-        }
-
-        console.log(
-          `[Discord RPC] No valid local cover for "${this.currentTrack.title}"${artist ? ` by ${artist}` : ""}, fetching from Tidal...`,
+        const line1 = this.buildCompoundFormat(
+          this.settings.line1Left,
+          this.settings.line1Right,
+          this.settings.line1CustomLeft,
+          this.settings.line1CustomRight,
+          this.currentTrack,
         );
-        const foundCover = await this.searchCoverFromTidal();
 
-        this.coverCache.set(cacheKey, foundCover);
-        this.pruneCache();
+        const line2 = this.buildCompoundFormat(
+          this.settings.line2Left,
+          this.settings.line2Right,
+          this.settings.line2CustomLeft,
+          this.settings.line2CustomRight,
+          this.currentTrack,
+        );
 
-        if (foundCover) {
-          console.log(`[Discord RPC] Found Tidal cover: ${foundCover}`);
-          return foundCover;
-        } else {
-          console.log(
-            `[Discord RPC] No Tidal cover found for "${this.currentTrack.title}"${artist ? ` by ${artist}` : ""}`,
-          );
-        }
-      }
+        const line3 = this.buildCompoundFormat(
+          this.settings.line3Left,
+          this.settings.line3Right,
+          this.settings.line3CustomLeft,
+          this.settings.line3CustomRight,
+          this.currentTrack,
+        );
 
-      return null;
-    },
+        const appName = this.buildCompoundFormat(
+          this.settings.appNameLeft,
+          this.settings.appNameRight,
+          this.settings.appNameCustomLeft,
+          this.settings.appNameCustomRight,
+          this.currentTrack,
+        );
 
-    async searchCoverFromTidal(title = null, artist = null) {
-      if (!this.api?.request) return null;
-
-      try {
-        const searchTitle = title || this.currentTrack?.title;
-        const searchArtist =
-          artist !== null ? artist : this.currentTrack?.artist || "";
-
-        if (!searchTitle) return null;
-
-        const coverUrl = await this.api.request("searchCover", {
-          title: searchTitle,
-          artist: searchArtist,
-          trackId: !title ? this.currentTrack?.id || null : null,
-          requester: title
-            ? "Discord Rich Presence Preview"
-            : "Discord Rich Presence",
+        const buildPresenceData = (coverUrl) => ({
+          line1: line1 || "Unknown",
+          line2: line2 || "Unknown",
+          line3: line3 || null,
+          app_name: appName || null,
+          status_display_type: this.settings.statusDisplayType,
+          cover_url: coverUrl || null,
+          track_id: this.currentTrack?.id ?? null,
+          track_cover_path: this.settings.useLocalCovers
+            ? (this.currentTrack?.track_cover_path || null)
+            : null,
+          current_time: Math.floor(this.currentTime * 1000),
+          duration: Math.floor(this.duration * 1000),
+          is_playing: capturedIsPlaying,
+          show_pause_icon: this.settings.showPauseIcon,
         });
 
-        return coverUrl;
-      } catch (error) {
-        return null;
+        try {
+          // send immediately with no cover => don't block on cover resolution
+          await this.api.discord.updatePresence(buildPresenceData(null));
+          this.lastProgressUpdate = Date.now();
+
+          // resolve cover in background; update presence again when ready
+          const trackSnapshot = this.currentTrack;
+          this.resolveCover(trackSnapshot).then(async (coverUrl) => {
+            // only apply if we're still on the same track
+            if (!coverUrl || this.currentTrack?.id !== trackSnapshot?.id) return;
+            try {
+              await this.api.discord.updatePresence(buildPresenceData(coverUrl));
+            } catch (e) {
+              console.error("[Discord RPC] Cover presence update failed:", e);
+            }
+          });
+        } catch (error) {
+          console.error("[Discord RPC] Update failed:", error);
+          this.isConnected = false;
+          const isSocketError = error && error.message && error.message.includes("IPC socket");
+          const delay = isSocketError ? 30000 : 2000;
+          if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
+          this.reconnectTimeout = setTimeout(() => this.connect(), delay);
+        }
+      } finally {
+        this._updatePresenceLock = false;
       }
     },
 
+    // resolve the best available cover URL for a track
+    // fires local backend call and/or online provider query in parallel,
+    // waits up to 4s for the first result, then 2s more for higher-priority sources
+    // returns the highest-priority cover URL available, or null if none found
+    async resolveCover(track) {
+      if (!track?.id) return null;
+
+      const trackId = track.id;
+
+      // cache hit => return immediately
+      if (this.coverCache.has(trackId)) {
+        return this.coverCache.get(trackId);
+      }
+
+      const priority = (this.settings.coverPriority || "local")
+        .toLowerCase()
+        .split("/")
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      const useLocal = this.settings.useLocalCovers && priority.includes("local");
+      const useOnline = this.settings.useOnlineCovers && priority.some((p) => p !== "local");
+
+      if (!useLocal && !useOnline) return null;
+
+      // collect results as they arrive: sourceId -> url
+      const results = new Map();
+      const promises = [];
+
+      const pickBest = () => {
+        for (const source of priority) {
+          if (results.has(source)) return results.get(source);
+        }
+        return null;
+      };
+
+      // local: ask backend to resolve (upload if needed) and return the URL
+      // only passes track_cover_path when useLocalCovers is on . backend only uploads then
+      if (useLocal) {
+        if (track.cover_url?.startsWith("https://")) {
+          // already persisted from a previous play , use directly, no upload needed
+          results.set("local", track.cover_url);
+        } else if (track.track_cover_path) {
+          const localPromise = this.api.discord.resolveCover(
+            track.id,
+            track.track_cover_path
+          ).then((url) => {
+            if (url) results.set("local", url);
+          }).catch(() => {});
+          promises.push(localPromise);
+        }
+      }
+
+      // online: fan out to registered runtime providers
+      if (useOnline) {
+        const onlinePromise = new Promise((resolve) => {
+          this.api.covers.query(
+            { title: track.title || "", artist: track.artist || "", album: track.album || "" },
+            (result) => {
+              if (result.status === "success" && result.url?.startsWith("https://")) {
+                results.set(result.sourceId, result.url);
+              }
+            },
+            resolve
+          );
+        });
+        promises.push(onlinePromise);
+      }
+
+      // race: wait up to 4s for the first result, then 2s more for higher-priority ones
+      // skip entirely if we already have results and nothing async is pending
+      if (promises.length === 0) {
+        const best = pickBest();
+        if (best) {
+          this.coverCache.set(trackId, best);
+          this.pruneCache();
+        }
+        return best || null;
+      }
+
+      await new Promise((resolve) => {
+        let firstResultTimer = null;
+        let finalTimer = null;
+
+        const checkFirstResult = () => {
+          if (results.size > 0 && !firstResultTimer) {
+            // first result arrived => wait 2s more for higher-priority sources
+            firstResultTimer = setTimeout(resolve, 2000);
+          }
+        };
+
+        // poll for first result arrival
+        const pollInterval = setInterval(() => {
+          checkFirstResult();
+          if (firstResultTimer) clearInterval(pollInterval);
+        }, 100);
+
+        // 4s total wait for first result
+        finalTimer = setTimeout(() => {
+          clearInterval(pollInterval);
+          clearTimeout(firstResultTimer);
+          resolve();
+        }, 4000);
+
+        // also resolve early if all sources report back
+        Promise.all(promises).then(() => {
+          clearInterval(pollInterval);
+          clearTimeout(firstResultTimer);
+          clearTimeout(finalTimer);
+          resolve();
+        });
+      });
+
+      const best = pickBest();
+      if (best) {
+        this.coverCache.set(trackId, best);
+        this.pruneCache();
+      }
+      return best || null;
+    },
+
+    // Prune cover cache when it exceeds max size => remove oldest entries
     pruneCache() {
       if (this.coverCache.size > this.MAX_COVER_CACHE_SIZE) {
-        const entries = Array.from(this.coverCache.entries());
-        const toKeep = entries.slice(-this.MAX_COVER_CACHE_SIZE / 2);
-        this.coverCache.clear();
-        toKeep.forEach(([key, value]) => this.coverCache.set(key, value));
+        const toRemove = this.coverCache.size - this.MAX_COVER_CACHE_SIZE;
+        const keys = this.coverCache.keys();
+        for (let i = 0; i < toRemove; i++) {
+          this.coverCache.delete(keys.next().value);
+        }
       }
     },
 
+    // refresh cover art for the current track:
+    // clears DB entry, in-memory cache, and re-runs cover resolution
+    async refreshCover() {
+      const track = this.currentTrack;
+      if (!track?.id) return;
+
+      try {
+        // clear DB entry so backend re-uploads
+        await this.api.library.updateTrackCoverUrl(track.id, null);
+        // clear in-memory cache
+        this.coverCache.delete(track.id);
+        // re-run presence => will resolve cover fresh
+        await this.updatePresence(true);
+      } catch (err) {
+        console.error("[Discord RPC] Cover refresh failed:", err);
+      }
+    },
+
+    // Clear Discord presence
     async clearPresence() {
       if (!this.isConnected) return;
 
@@ -1983,8 +2249,10 @@
       }
     },
 
+    // Lifecycle: required by Audion plugin API
     start() {},
 
+    // Lifecycle: clear presence and timers on stop
     stop() {
       this.clearPresence();
 
@@ -1997,8 +2265,14 @@
         clearTimeout(this.activityClearTimeout);
         this.activityClearTimeout = null;
       }
+
+      if (this.reconnectTimeout) {
+        clearTimeout(this.reconnectTimeout);
+        this.reconnectTimeout = null;
+      }
     },
 
+    // Lifecycle: disconnect and remove DOM elements
     destroy() {
       this.disconnect();
 
@@ -2012,6 +2286,10 @@
 
       if (this.connectionStatusInterval) {
         clearInterval(this.connectionStatusInterval);
+      }
+
+      if (this.reconnectTimeout) {
+        clearTimeout(this.reconnectTimeout);
       }
 
       const modal = document.getElementById("drpc-modal");

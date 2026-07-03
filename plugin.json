@@ -1,28 +1,34 @@
 {
-    "name": "Discord Rich Presence",
-    "safe_name": "discord-rich-presence",
-    "version": "2.1.1",
-    "author": "Manga-Knights",
-    "description": "Show what you're listening to on Discord",
-    "type": "js",
-    "entry": "index.js",
-    "permissions": [
-        "player:read",
-        "ui:inject",
-        "storage:local"
-    ],
-    "cross_plugin_access": [
-        {
-            "plugin": "Tidal Search",
-            "methods": [
-                "searchCover"
-            ]
-        }
-    ],
-    "category": "appearance",
-    "tags": [
-        "discord",
-        "rich-presence"
-    ],
-    "license": "MIT"
+  "name": "Discord Rich Presence",
+  "safe_name": "discord-rich-presence",
+  "version": "3.0.0",
+  "author": "Manga-Knights & Reclusive",
+  "description": "Show what you're listening to on Discord",
+  "repo": "https://github.com/dupitydumb/audion-discord-rich-presence",
+  "manifest_url": null,
+  "type": "js",
+  "entry": "index.js",
+  "permissions": [
+    "player:read",
+    "ui:inject",
+    "storage:local",
+    "network:fetch"
+  ],
+  "cross_plugin_access": [
+    {
+      "plugin": "Tidal Search",
+      "methods": [
+        "searchCover"
+      ]
+    }
+  ],
+  "ui_slots": null,
+  "icon": "rpc.png",
+  "icon_url": null,
+  "category": "appearance",
+  "tags": [
+    "discord",
+    "rich-presence"
+  ],
+  "license": "MIT"
 }
